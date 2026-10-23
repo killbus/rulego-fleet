@@ -1,0 +1,211 @@
+name: Fleet verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # actions/checkout v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Read manifest
+        run: |
+          set -euo pipefail
+          MANIFEST=manifest.json
+          test -f "$MANIFEST"
+          jq -e '
+            .schema == "fleet-manifest/v1" and
+            (.abi.abi_id | test("^abi-[0-9a-f]{64}$")) and
+            (.abi.lock_digest | test("^sha256:[0-9a-f]{64}$")) and
+            (.runtime.image | test("@sha256:[0-9a-f]{64}$")) and
+            (.sdk | test("^ghcr\\.io/killbus/rulego-plugin-sdk@sha256:[0-9a-f]{64}$")) and
+            ([.members[] | select(.source.type == "release" and ((.source.sha256 | length) < 2))] | length == 0) and
+            ([.members[] | select(.source.type == "build" and ((.source.commit | length) != 40))] | length == 0) and
+            ([.members[].artifact] | length == ([.members[].artifact] | unique | length))
+          ' "$MANIFEST"
+          {
+            echo "MANIFEST=$MANIFEST"
+            echo "ABI_ID=$(jq -er .abi.abi_id "$MANIFEST")"
+            echo "LOCK_DIGEST=$(jq -er .abi.lock_digest "$MANIFEST")"
+            echo "RUNTIME_REF=$(jq -er .runtime.image "$MANIFEST")"
+            echo "RULEGO_RELEASE=$(jq -er .runtime.rulegoRelease "$MANIFEST")"
+            echo "SDK_REF=$(jq -er .sdk "$MANIFEST")"
+          } >> "$GITHUB_ENV"
+      - name: Pull pinned runtime with bounded retry
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            if docker pull --platform "linux/${{ matrix.arch }}" "$RUNTIME_REF"; then break; fi
+            test "$attempt" -lt 4
+            sleep $((2 ** attempt))
+          done
+          test "$(docker image inspect --format '{{ index .Config.Labels "io.rulego.server.release" }}' "$RUNTIME_REF")" = "$RULEGO_RELEASE"
+      - name: Pull pinned SDK with bounded retry
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            if docker pull --platform "linux/${{ matrix.arch }}" "$SDK_REF"; then break; fi
+            test "$attempt" -lt 4
+            sleep $((2 ** attempt))
+          done
+      - name: Acquire member bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          acquire="$PWD/acquire"
+          mkdir -p "$acquire"
+          jq -c '.members[]' "$MANIFEST" | while IFS= read -r m; do
+            repo=$(jq -er .repo <<<"$m")
+            artifact=$(jq -er .artifact <<<"$m" | sed "s/{arch}/${{ matrix.arch }}/g")
+            stype=$(jq -er .source.type <<<"$m")
+            echo "== $repo ($stype) -> $artifact"
+            if test "$stype" = "release"; then
+              tag=$(jq -er .source.tag <<<"$m")
+              want_sha=$(jq -er ".source.sha256.\"${{ matrix.arch }}\"" <<<"$m")
+              d="$acquire/$repo"
+              mkdir -p "$d"
+              for attempt in 1 2 3 4; do
+                rm -f "$d/$artifact" "$d/$artifact.sha256" "$d/$artifact.abi.json"
+                if gh release download "$tag" --repo "$repo" --dir "$d" \
+                  --pattern "$artifact" --pattern "$artifact.sha256" --pattern "$artifact.abi.json"; then
+                  break
+                fi
+                test "$attempt" -lt 4
+                sleep $((2 ** attempt))
+              done
+              (cd "$d" && sha256sum --check "$artifact.sha256")
+              got_sha=$(sha256sum "$d/$artifact" | awk '{print $1}')
+              test "$got_sha" = "$want_sha"
+              jq -e --arg abi "$ABI_ID" --arg lock "$LOCK_DIGEST" \
+                --arg platform "linux/${{ matrix.arch }}" --arg sha "$got_sha" '
+                  .abi_id == $abi and .lock_digest == $lock and
+                  .platform == $platform and .plugin_sha256 == $sha
+                ' "$d/$artifact.abi.json"
+            else
+              commit=$(jq -er .source.commit <<<"$m")
+              path=$(jq -er '.source.path // "."' <<<"$m")
+              d="$acquire/$repo"
+              mkdir -p "$d"
+              # fails loudly while the pinned commit is unreachable on origin
+              git -C "$d" init -q
+              git -C "$d" remote add origin "https://github.com/$repo.git"
+              git -C "$d" fetch -q --depth 1 origin "$commit"
+              git -C "$d" checkout -q FETCH_HEAD
+              test "$(git -C "$d" rev-parse HEAD)" = "$commit"
+              test -d "$d/$path"
+              src="/workspace"
+              test "$path" = "." || src="/workspace/$path"
+              install -d -m 0777 "$d/dist"
+              docker run --rm --platform "linux/${{ matrix.arch }}" \
+                -e RULEGO_PLUGIN_SOURCE="$src" \
+                -v "$d:/workspace:ro" \
+                -v "$d/dist:/output" \
+                "$SDK_REF" . "/output/$artifact"
+              got_sha=$(sha256sum "$d/dist/$artifact" | awk '{print $1}')
+              jq -e --arg abi "$ABI_ID" --arg lock "$LOCK_DIGEST" \
+                --arg platform "linux/${{ matrix.arch }}" --arg sha "$got_sha" '
+                  .abi_id == $abi and .lock_digest == $lock and
+                  .platform == $platform and .plugin_sha256 == $sha
+                ' "$d/dist/$artifact.abi.json"
+              cp "$d/dist/$artifact" "$d/$artifact"
+            fi
+          done
+          echo "MANIFEST_SOURCES=$(jq -r '[.members[] | .repo + ":" + .source.type] | join(",")' "$MANIFEST")"
+      - name: Load set into pinned runtime and read back
+        run: |
+          set -euo pipefail
+          acquire="$PWD/acquire"
+          data="$PWD/runtime-data"
+          rm -rf "$data"
+          mkdir -p "$data/plugins"
+          n=$(jq '.members | length' "$MANIFEST")
+          for ((k = 0; k < n; k++)); do
+            repo=$(jq -r ".members[$k].repo" "$MANIFEST")
+            artifact=$(jq -er ".members[$k].artifact" "$MANIFEST" | sed "s/{arch}/${{ matrix.arch }}/g")
+            d="$acquire/$repo"
+            test -f "$d/$artifact"
+            cp "$d/$artifact" "$data/plugins/$(printf '%02d' $((k + 1)))-$(echo "$repo" | tr '/' '_').so"
+          done
+          chmod -R a+rwX "$data"
+          container="fleet-verify-${{ matrix.arch }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            if test -n "${container:-}"; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup EXIT
+          docker run --rm --detach --name "$container" \
+            --platform "linux/${{ matrix.arch }}" -p 127.0.0.1:9090:9090 \
+            -v "$data:/app/data" "$RUNTIME_REF"
+          for attempt in $(seq 1 100); do
+            if curl --fail --silent http://127.0.0.1:9090/api/v1/components >"$PWD/components.json"; then break; fi
+            if test "$(docker inspect --format='{{.State.Running}}' "$container")" != true; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 0.2
+          done
+          test -s "$PWD/components.json" || { docker logs "$container"; exit 1; }
+          jq -e --slurpfile mf "$MANIFEST" '
+            ([ $mf[0].expected.nodes[] as $t | (.nodes | any(.type == $t)) ] | all) and
+            ([ $mf[0].expected.outProcessors[] as $t | (.builtins.endpoints.outProcessors | index($t) != null) ] | all)
+          ' "$PWD/components.json"
+          docker logs "$container" >"$PWD/runtime.log" 2>&1
+          ! grep -Eiq 'plugin was built with a different version of package|failed to load plugin|load plugin.*(error|failed)' \
+            "$PWD/runtime.log"
+          docker rm -f "$container" >/dev/null
+          container=""
+      - name: Verify shared package identity across members
+        run: |
+          set -euo pipefail
+          acquire="$PWD/acquire"
+          n=$(jq '.members | length' "$MANIFEST")
+          jq -r '.shared_packages[]' "$MANIFEST" | while IFS= read -r pkg; do
+            test -n "$pkg"
+            first=""
+            found=0
+            for ((k = 0; k < n; k++)); do
+              repo=$(jq -r ".members[$k].repo" "$MANIFEST")
+              artifact=$(jq -er ".members[$k].artifact" "$MANIFEST" | sed "s/{arch}/${{ matrix.arch }}/g")
+              d="$acquire/$repo"
+              docker run --rm --platform "linux/${{ matrix.arch }}" --entrypoint go \
+                -v "$d:/coexistence:ro" \
+                "$SDK_REF" version -m "/coexistence/$artifact" >"$PWD/id-$k.txt"
+              line=$(awk -v p="$pkg" '$1 == "dep" && $2 == p { print $2 "\t" $3 "\t" $4 }' "$PWD/id-$k.txt")
+              if test -n "$line"; then
+                test "$found" = 0 || test "$line" = "$first"
+                first="$line"
+                found=1
+              fi
+            done
+            test "$found" = 1
+            echo "shared $pkg -> $first"
+          done
+      - name: Record run sources
+        if: always()
+        run: |
+          {
+            echo "## Fleet run sources"
+            echo "- manifest: \`${MANIFEST}\`"
+            echo "- arch: linux/${{ matrix.arch}}"
+            echo "- runtime: \`${RUNTIME_REF}\` (io.rulego.server.release=${RULEGO_RELEASE})"
+            echo "- sources: ${MANIFEST_SOURCES}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.members[] | select(.source.type == "build") | "  - built from pinned commit (no release yet): `\(.repo)` @ `\(.source.commit[0:7])`"' "$MANIFEST" >> "$GITHUB_STEP_SUMMARY" || true

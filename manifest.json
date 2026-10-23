@@ -1,0 +1,59 @@
+{
+  "schema": "fleet-manifest/v1",
+  "abi": {
+    "abi_id": "abi-3e0c9d46dddaf6235cfe609d543222f07f8e1abf3374f0669bf703df85063885",
+    "lock_digest": "sha256:e19c9657ede2e9da86aae38c2ab972d32ff22aa2f2c8f1aa327714967baf8f80"
+  },
+  "runtime": {
+    "image": "ghcr.io/killbus/rulego-server@sha256:53719b71a4890a39086a921c557ab2c0386de57a5450cceaad5d7fc7564f0419",
+    "rulegoRelease": "v1.0.0"
+  },
+  "sdk": "ghcr.io/killbus/rulego-plugin-sdk@sha256:c5fadb574a1171854eead3a9f94484e1470aba5496d51c2751a6313d7f2b8d01",
+  "members": [
+    {
+      "repo": "killbus/rulego-resource-origin",
+      "artifact": "resource-origin-rulego-v0.2.0-linux-{arch}.so",
+      "source": {
+        "type": "release",
+        "tag": "v0.2.0",
+        "sha256": {
+          "amd64": "f6532aedba58205269b4ec7e5b5fc49ffe60c19b80770e0b63172d79d3392367",
+          "arm64": "19ab29f1a7338c8b4506bf807ffd64ddc4551db08af35da7b950050c56857ea1"
+        }
+      }
+    },
+    {
+      "repo": "killbus/rulego-indexed-media",
+      "artifact": "indexed-media-rulego-v0.3.1-linux-{arch}.so",
+      "source": {
+        "type": "build",
+        "commit": "f3e64b78383e1c620baf2d124e03acb9fd62a8f0",
+        "path": "."
+      }
+    },
+    {
+      "repo": "killbus/rulego-ffmpeg-over-ip",
+      "artifact": "ffmpeg-over-ip-rulego-v0.5.2-linux-{arch}.so",
+      "source": {
+        "type": "build",
+        "commit": "cd3f4467ceeb398dd220bc2dde888bc4695a294d",
+        "path": "plugin"
+      }
+    }
+  ],
+  "shared_packages": [
+    "github.com/killbus/rulego-ffmpeg-over-ip"
+  ],
+  "expected": {
+    "nodes": [
+      "resourceOrigin",
+      "indexedMedia",
+      "ffmpegOverIp",
+      "ffmpegOverIpProducer"
+    ],
+    "outProcessors": [
+      "resourceOriginResponse",
+      "ffmpegOverIpResponse"
+    ]
+  }
+}
