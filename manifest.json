@@ -35,9 +35,12 @@
       "repo": "killbus/rulego-ffmpeg-over-ip",
       "artifact": "ffmpeg-over-ip-rulego-v0.5.2-linux-{arch}.so",
       "source": {
-        "type": "build",
-        "commit": "cd3f4467ceeb398dd220bc2dde888bc4695a294d",
-        "path": "plugin"
+        "type": "release",
+        "tag": "v0.5.2",
+        "sha256": {
+          "amd64": "bba08421164d24b18bb7d0464ae40067e155aee11ad391f9da7fc6ce81f60fb1",
+          "arm64": "ca9bbe9c151b3f08acc624f9e3012095c98c9341f94baf323deecc83e4c0f926"
+        }
       }
     }
   ],
