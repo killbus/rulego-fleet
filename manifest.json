@@ -26,9 +26,12 @@
       "repo": "killbus/rulego-indexed-media",
       "artifact": "indexed-media-rulego-v0.3.1-linux-{arch}.so",
       "source": {
-        "type": "build",
-        "commit": "f3e64b78383e1c620baf2d124e03acb9fd62a8f0",
-        "path": "."
+        "type": "release",
+        "tag": "v0.3.1",
+        "sha256": {
+          "amd64": "0e9bf6304f106c79ca6a96881a5dc36bbdbef14dedd9310834c48a512081e858",
+          "arm64": "02c563190f81b5f042fcf17748effcfc89c26bb1e83bb9930add8aa65d8da708"
+        }
       }
     },
     {
