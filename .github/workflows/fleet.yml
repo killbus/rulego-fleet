@@ -32,14 +32,15 @@ jobs:
           MANIFEST=manifest.json
           test -f "$MANIFEST"
           jq -e '
-            .schema == "fleet-manifest/v1" and
-            (.abi.abi_id | test("^abi-[0-9a-f]{64}$")) and
-            (.abi.lock_digest | test("^sha256:[0-9a-f]{64}$")) and
-            (.runtime.image | test("@sha256:[0-9a-f]{64}$")) and
-            (.sdk | test("^ghcr\\.io/killbus/rulego-plugin-sdk@sha256:[0-9a-f]{64}$")) and
-            ([.members[] | select(.source.type == "release" and ((.source.sha256 | length) < 2))] | length == 0) and
-            ([.members[] | select(.source.type == "build" and ((.source.commit | length) != 40))] | length == 0) and
-            ([.members[].artifact] | length == ([.members[].artifact] | unique | length))
+            . as $m |
+            $m.schema == "fleet-manifest/v1" and
+            ($m.abi.abi_id | test("^abi-[0-9a-f]{64}$")) and
+            ($m.abi.lock_digest | test("^sha256:[0-9a-f]{64}$")) and
+            ($m.runtime.image | test("@sha256:[0-9a-f]{64}$")) and
+            ($m.sdk | test("^ghcr\\.io/killbus/rulego-plugin-sdk@sha256:[0-9a-f]{64}$")) and
+            ([$m.members[] | select(.source.type == "release" and ((.source.sha256 | length) < 2))] | length == 0) and
+            ([$m.members[] | select(.source.type == "build" and ((.source.commit | length) != 40))] | length == 0) and
+            ([$m.members[].artifact] | length == (unique | length))
           ' "$MANIFEST"
           {
             echo "MANIFEST=$MANIFEST"
